@@ -8,18 +8,16 @@
 import Foundation
 import Security
 
-private func paddingForHashFunction(_ f : SignatureAlgorithm.HashFunction) -> SecPadding {
+private func secKeyAlgorithemForHashFunction(_ f : SignatureAlgorithm.HashFunction) -> SecKeyAlgorithm {
     switch f {
     case .sha256:
-        return SecPadding.PKCS1SHA256
+        return .rsaSignatureMessagePKCS1v15SHA256
     case .sha384:
-        return SecPadding.PKCS1SHA384
+        return .rsaSignatureMessagePKCS1v15SHA384
     case .sha512:
-        return SecPadding.PKCS1SHA512
+        return .rsaSignatureMessagePKCS1v15SHA512
     }
 }
-
-
 
 public struct RSAKey {
     enum Error : Swift.Error {
@@ -102,34 +100,22 @@ public struct RSAPKCS1Verifier : SignatureValidator {
         return false
     }
     public func verify(_ input : Data, signature : Data) -> Bool {
-        let signedDataHash = (input as NSData).jwt_shaDigest(withSize: self.hashFunction.rawValue)
-        let padding = paddingForHashFunction(self.hashFunction)
-        
-        let result = signature.withUnsafeBytes { signatureRawPointer in
-            signedDataHash.withUnsafeBytes { signedHashRawPointer in
-                SecKeyRawVerify(
-                    key.value,
-                    padding,
-                    signedHashRawPointer,
-                    signedDataHash.count,
-                    signatureRawPointer,
-                    signature.count
-                )
-            }
-        }
-        
-        switch result {
-        case errSecSuccess:
-            return true
-        default:
-            return false
-        }
+        var error: Unmanaged<CFError>? = nil
+        let algo = secKeyAlgorithemForHashFunction(hashFunction)
+
+        return SecKeyVerifySignature(
+            key.value,
+            algo,
+            input as CFData,
+            signature as CFData,
+            &error
+        )
     }
 }
 
 public struct RSAPKCS1Signer : TokenSigner {
     enum Error : Swift.Error {
-        case securityError(OSStatus)
+        case securityError(CFError)
     }
     
     let hashFunction : SignatureAlgorithm.HashFunction
@@ -145,20 +131,13 @@ public struct RSAPKCS1Signer : TokenSigner {
     }
 
     public func sign(_ input : Data) throws -> Data {
-        let signedDataHash = (input as NSData).jwt_shaDigest(withSize: self.hashFunction.rawValue)
-        let padding = paddingForHashFunction(self.hashFunction)
-        
-        var result = Data(count: SecKeyGetBlockSize(self.key.value))
-        var resultSize = result.count
-        let status = result.withUnsafeMutableBytes { resultBytes in
-            SecKeyRawSign(key.value, padding, (signedDataHash as NSData).bytes.bindMemory(to: UInt8.self, capacity: signedDataHash.count), signedDataHash.count, UnsafeMutablePointer<UInt8>(resultBytes), &resultSize)
-        }
-        
-        switch status {
-        case errSecSuccess:
-            return result.subdata(in: 0..<resultSize)
-        default:
-            throw Error.securityError(status)
+        var error: Unmanaged<CFError>? = nil
+        let algo = secKeyAlgorithemForHashFunction(hashFunction)
+
+        if let data = SecKeyCreateSignature(key.value, algo, input as CFData, &error) {
+            return data as Data
+        } else {
+            throw Error.securityError(error!.takeRetainedValue())
         }
     }
 }
